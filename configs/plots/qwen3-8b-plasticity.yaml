@@ -1,0 +1,10 @@
+bucket_csv: results/qwen3-8b/head_bucket_plasticity.csv
+output: results/qwen3-8b/plasticity.png
+model_name: Qwen3 8B
+bucket_type: uniform
+bucket_min_size: 2048
+alpha: 0.2
+line_width: 0.8
+color_trend: true
+trend_threshold: 0.000005
+cmap: viridis

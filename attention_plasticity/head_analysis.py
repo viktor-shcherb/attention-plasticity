@@ -6,6 +6,7 @@ from typing import Dict, Optional
 
 import numpy as np
 from datasets import load_dataset
+from huggingface_hub import hf_hub_url
 
 from .data_utils import orientation_from_keys, stack_oriented_examples
 from .plasticity import NUM_PAIRS_PER_BUCKET, compute_attention_plasticity
@@ -37,13 +38,22 @@ def analyze_head(
     Perform analysis for a single (layer, query_head, key_head) and
     return a dict of per-head metrics.
     """
-    # Data dirs
-    data_dir_q = f"{model_dir}/l{layer:02d}h{q_head:02d}q"
-    data_dir_k = f"{model_dir}/l{layer:02d}h{k_head:02d}k"
 
-    # Load datasets
-    queries = load_dataset(dataset_name, data_dir=data_dir_q)
-    keys = load_dataset(dataset_name, data_dir=data_dir_k)
+    split = model_dir
+    config_q = f"l{layer:02d}h{q_head:02d}q"
+    config_k = f"l{layer:02d}h{k_head:02d}k"
+    url_q = hf_hub_url(
+        repo_id=dataset_name,
+        filename=f"{split}/{config_q}/data.parquet",
+        repo_type="dataset"
+    )
+    url_k = hf_hub_url(
+        repo_id=dataset_name,
+        filename=f"{split}/{config_k}/data.parquet",
+        repo_type="dataset"
+    )
+    queries = load_dataset("parquet", data_files=url_q)
+    keys = load_dataset("parquet", data_files=url_k)
 
     # Orientation from keys, then oriented q/k
     orient = orientation_from_keys(keys)
