@@ -1,0 +1,12 @@
+model_dir: HuggingFaceTB_SmolLM2_135M
+dataset_name: viktoroo/sniffed-qk-smollm2-135m
+num_layers: 30
+num_q_heads: 9
+num_k_heads: 3
+max_tokens_per_head: 50000
+normality_max_dims: 64
+p_alpha: 0.01
+seed: 0
+output_csv: results/smollm2-135m/head_metrics.csv
+bucket_csv: results/smollm2-135m/head_bucket_plasticity.csv
+max_workers: 8

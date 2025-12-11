@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "attention-plasticity"
+version = "0.1.0"
+description = "Head-level positional analysis and plotting"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Viktor Shcherbakov"}]
+dependencies = [
+  "numpy>=1.23",
+  "pandas>=2.0",
+  "datasets>=2.14",
+  "scipy>=1.10",
+  "python-dotenv>=1.0",
+  "matplotlib>=3.7",
+  "pyyaml>=6.0"
+]
+
+[project.scripts]
+analyze-heads = "analyze:main"
+plot-plasticity = "scripts.plot_plasticity:main"
+
+[tool.setuptools.packages.find]
+include = ["attention_plasticity", "scripts"]
+
+[tool.setuptools]
+py-modules = ["analyze"]

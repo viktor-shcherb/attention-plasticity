@@ -1,0 +1,10 @@
+bucket_csv: results/smollm2-135m/head_bucket_plasticity.csv
+output: results/smollm2-135m/plasticity.png
+model_name: SmolLM2-135M
+bucket_type: uniform
+bucket_min_size: 512
+alpha: 0.2
+line_width: 0.8
+color_trend: true
+trend_threshold: 0.00001
+cmap: viridis
