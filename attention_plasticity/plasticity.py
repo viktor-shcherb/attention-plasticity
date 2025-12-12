@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Dict, Optional, Tuple
 
 import numpy as np
@@ -19,18 +20,20 @@ def compute_attention_plasticity(
     resid_var: np.ndarray,
     p_k: np.ndarray,
     b_k: np.ndarray,
+    example_ids_k: np.ndarray,
     X_k_rot: np.ndarray,
     num_pairs_per_bucket: int = NUM_PAIRS_PER_BUCKET,
     seed: int = 0,
     bucket_window_limits: Optional[Dict[int, int]] = None,
-) -> Tuple[float, Dict[int, float]]:
+) -> Tuple[float, Dict[Tuple[int, int], float]]:
     """
     Compute attention plasticity for a head:
-      - For each bucket b, sample key pairs (k1,k2) with keys from buckets < b.
+      - For each query bucket b > 0, and each eligible key bucket c < b,
+        sample key pairs (k1, k2) drawn from bucket c only.
       - For queries in bucket b, approximate p(k1,k2) = P(q·k1 > q·k2 | bucket b)
-        using Normal noise model on q as derived in the rotated basis.
+        using the Normal noise model on q in the rotated basis.
       - For each pair, define pairwise plasticity PP = 4 p(1-p).
-      - Head-level plasticity is the average PP over buckets and key pairs.
+      - Head-level plasticity is the average PP over (q_bucket, k_bucket) pairs.
 
     Uses:
       - Linear mean model: mu(t) = alpha_rot + beta_rot * t.
@@ -38,72 +41,104 @@ def compute_attention_plasticity(
     """
     rng = np.random.default_rng(seed)
 
-    # Representative position per bucket
-    buckets = np.unique(b_q.astype(int))
-    sigma2 = resid_var.astype(np.float64)
-    sigma2_safe = np.where(sigma2 <= 0, 1e-12, sigma2)
-
-    ap_bucket: Dict[int, float] = {}
-
     b_q_int = b_q.astype(int)
     b_k_int = b_k.astype(int)
 
-    for bucket in buckets:
-        # Queries in this bucket
-        mask_q_b = b_q_int == bucket
+    q_buckets = np.unique(b_q_int)
+    k_buckets = np.unique(b_k_int)
+
+    example_ids_k = example_ids_k.astype(np.int64)
+    bucket_example_indices: Dict[int, Dict[int, np.ndarray]] = {}
+    temp: Dict[int, Dict[int, list]] = defaultdict(lambda: defaultdict(list))
+    for idx, (bucket, example_id) in enumerate(zip(b_k_int, example_ids_k)):
+        temp[int(bucket)][int(example_id)].append(idx)
+    for bucket, per_example in temp.items():
+        bucket_example_indices[bucket] = {
+            example_id: np.asarray(indices, dtype=np.int64)
+            for example_id, indices in per_example.items()
+        }
+
+    sigma2 = resid_var.astype(np.float64)
+    sigma2_safe = np.where(sigma2 <= 0, 1e-12, sigma2)
+
+    ap_pairs: Dict[Tuple[int, int], float] = {}
+
+    for q_bucket in q_buckets:
+        q_bucket = int(q_bucket)
+        if q_bucket <= 0:
+            # Bucket 0 cannot attend to earlier tokens yet.
+            continue
+
+        mask_q_b = b_q_int == q_bucket
         if not mask_q_b.any():
-            ap_bucket[bucket] = np.nan
             continue
 
         t_b = float(p_q[mask_q_b].mean())
+        min_allowed_bucket: Optional[int] = None
+        if bucket_window_limits and q_bucket in bucket_window_limits:
+            span = int(bucket_window_limits[q_bucket])
+            span = max(span, 1)
+            min_allowed_bucket = q_bucket - span
 
-        # Keys from strictly earlier buckets
-        key_mask = b_k_int < bucket
-        if bucket_window_limits and bucket in bucket_window_limits:
-            span = max(int(bucket_window_limits[bucket]), 1)
-            min_bucket = bucket - span
-            key_mask = np.logical_and(key_mask, b_k_int >= min_bucket)
-        key_idx = np.where(key_mask)[0]
-        if key_idx.size < 2:
-            ap_bucket[bucket] = np.nan
+        candidate_key_buckets = []
+        for kb in k_buckets:
+            kb = int(kb)
+            if kb >= q_bucket:
+                continue
+            if min_allowed_bucket is not None and kb < min_allowed_bucket:
+                continue
+            candidate_key_buckets.append(kb)
+        if not candidate_key_buckets:
             continue
 
-        # Mean query vector at representative position t_b (in rotated space)
         mu_tb = alpha_rot + beta_rot * t_b  # (d,)
 
-        # Number of pairs to sample (cap by total possible distinct pairs)
-        max_pairs = key_idx.size * (key_idx.size - 1) // 2
-        if max_pairs <= 0:
-            ap_bucket[bucket] = np.nan
-            continue
-        num_pairs = min(num_pairs_per_bucket, max_pairs)
-
-        pp_vals = []
-        for _ in range(num_pairs):
-            # Sample two distinct keys
-            i1, i2 = rng.choice(key_idx, size=2, replace=False)
-            k1 = X_k_rot[i1]
-            k2 = X_k_rot[i2]
-            delta_k = k1 - k2  # (d,)
-
-            # Mean and variance of logit difference d = q·(k1-k2)
-            m_d = float(mu_tb @ delta_k)
-            v_d = float((sigma2_safe * (delta_k ** 2)).sum())
-            if v_d <= 0:
+        for k_bucket in candidate_key_buckets:
+            example_groups = [
+                indices
+                for indices in bucket_example_indices.get(k_bucket, {}).values()
+                if indices.size >= 2
+            ]
+            if not example_groups:
+                ap_pairs[(q_bucket, k_bucket)] = np.nan
                 continue
 
-            z = m_d / np.sqrt(v_d)
-            p_pair = norm.cdf(z)
-            pp = 4.0 * p_pair * (1.0 - p_pair)
-            pp_vals.append(pp)
+            pair_counts = np.array(
+                [group.size * (group.size - 1) // 2 for group in example_groups],
+                dtype=np.int64,
+            )
+            total_pairs = int(pair_counts.sum())
+            if total_pairs <= 0:
+                ap_pairs[(q_bucket, k_bucket)] = np.nan
+                continue
+            num_pairs = min(num_pairs_per_bucket, total_pairs)
 
-        if pp_vals:
-            ap_bucket[bucket] = float(np.mean(pp_vals))
-        else:
-            ap_bucket[bucket] = np.nan
+            cum_counts = np.cumsum(pair_counts)
+            pp_vals = []
+            for _ in range(num_pairs):
+                r = rng.integers(total_pairs)
+                group_idx = int(np.searchsorted(cum_counts, r, side="right"))
+                indices = example_groups[group_idx]
+                i1, i2 = rng.choice(indices, size=2, replace=False)
+                k1 = X_k_rot[i1]
+                k2 = X_k_rot[i2]
+                delta_k = k1 - k2
 
-    # Aggregate per-head plasticity as mean over buckets (ignoring NaNs)
-    vals = [v for v in ap_bucket.values() if not np.isnan(v)]
+                m_d = float(mu_tb @ delta_k)
+                v_d = float((sigma2_safe * (delta_k ** 2)).sum())
+                if v_d <= 0:
+                    continue
+
+                z = m_d / np.sqrt(v_d)
+                p_pair = norm.cdf(z)
+                pp_vals.append(4.0 * p_pair * (1.0 - p_pair))
+
+            if pp_vals:
+                ap_pairs[(q_bucket, k_bucket)] = float(np.mean(pp_vals))
+            else:
+                ap_pairs[(q_bucket, k_bucket)] = np.nan
+
+    vals = [v for v in ap_pairs.values() if not np.isnan(v)]
     ap_overall = float(np.mean(vals)) if vals else np.nan
 
-    return ap_overall, ap_bucket
+    return ap_overall, ap_pairs

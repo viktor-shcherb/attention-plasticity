@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, Optional
 
 import numpy as np
@@ -33,6 +34,7 @@ def analyze_head(
     seed: int = 0,
     num_pairs_per_bucket: int = NUM_PAIRS_PER_BUCKET,
     dataset_name: str = DEFAULT_DATASET_NAME,
+    dataset_local_root: Optional[str] = None,
 ):
     """
     Perform analysis for a single (layer, query_head, key_head) and
@@ -42,18 +44,24 @@ def analyze_head(
     split = model_dir
     config_q = f"l{layer:02d}h{q_head:02d}q"
     config_k = f"l{layer:02d}h{k_head:02d}k"
-    url_q = hf_hub_url(
-        repo_id=dataset_name,
-        filename=f"{split}/{config_q}/data.parquet",
-        repo_type="dataset"
-    )
-    url_k = hf_hub_url(
-        repo_id=dataset_name,
-        filename=f"{split}/{config_k}/data.parquet",
-        repo_type="dataset"
-    )
-    queries = load_dataset("parquet", data_files=url_q)
-    keys = load_dataset("parquet", data_files=url_k)
+    base_path = Path(dataset_local_root).expanduser() if dataset_local_root else None
+
+    def _resolve_data_file(config_name: str) -> str:
+        if base_path:
+            candidate = base_path / split / config_name / "data.parquet"
+            if not candidate.exists():
+                raise FileNotFoundError(f"Local parquet not found: {candidate}")
+            return str(candidate)
+        return hf_hub_url(
+            repo_id=dataset_name,
+            filename=f"{split}/{config_name}/data.parquet",
+            repo_type="dataset",
+        )
+
+    url_q = _resolve_data_file(config_q)
+    url_k = _resolve_data_file(config_k)
+    queries = load_dataset("parquet", data_files=url_q, split="train")
+    keys = load_dataset("parquet", data_files=url_k, split="train")
 
     # Orientation from keys, then oriented q/k
     orient = orientation_from_keys(keys)
@@ -65,8 +73,8 @@ def analyze_head(
         seed=seed,
         return_sliding_window=True,
     )
-    p_k, b_k, X_k = stack_oriented_examples(
-        keys, orient, max_tokens=max_tokens_per_head, seed=seed
+    p_k, b_k, X_k, k_example_ids = stack_oriented_examples(
+        keys, orient, max_tokens=max_tokens_per_head, seed=seed, return_example_id=True
     )
 
     sliding_value = _extract_sliding_window_value(
@@ -88,7 +96,7 @@ def analyze_head(
         )
 
     # 1) Query predictability from position (multioutput) in original oriented space
-    _, beta_q_p, _, r2q_p = fit_multioutput_linear_regressor(p_q, X_q)
+    _, beta_q_p, r2_components, r2q_p = fit_multioutput_linear_regressor(p_q, X_q)
     beta_norm = float(np.linalg.norm(beta_q_p))
 
     # 2) Scalar position predictability via projection along beta_q_p
@@ -129,7 +137,7 @@ def analyze_head(
 
     # 6) Attention plasticity (per head, averaged over buckets and key pairs)
     ap_seed = seed + 10007 * layer + 379 * q_head
-    ap_overall, ap_bucket = compute_attention_plasticity(
+    ap_overall, ap_bucket_pairs = compute_attention_plasticity(
         p_q=p_q,
         b_q=b_q,
         X_q_rot=X_q_rot,
@@ -138,6 +146,7 @@ def analyze_head(
         resid_var=resid_var,
         p_k=p_k,
         b_k=b_k,
+        example_ids_k=k_example_ids,
         X_k_rot=X_k_rot,
         num_pairs_per_bucket=num_pairs_per_bucket,
         seed=ap_seed,
@@ -171,18 +180,41 @@ def analyze_head(
         "ap_overall": ap_overall,
     }
 
-    bucket_rows = [
+    r2_positive = np.clip(r2_components, 0.0, None)
+    total_info = float(r2_positive.sum())
+    if total_info <= 0:
+        component_weights = np.full_like(r2_positive, 1.0 / d_q)
+    else:
+        component_weights = r2_positive / total_info
+
+    component_rows = [
         {
             "layer": layer,
             "q_head": q_head,
             "k_head": k_head,
-            "bucket": int(bucket),
-            "ap_bucket": value,
+            "component": int(idx),
+            "component_r2": float(r2_components[idx]),
+            "component_weight": float(component_weights[idx]),
         }
-        for bucket, value in sorted(ap_bucket.items())
+        for idx in range(d_q)
     ]
 
-    return row, bucket_rows
+    bucket_rows = []
+    for (q_bucket, k_bucket), value in sorted(ap_bucket_pairs.items()):
+        if q_bucket <= 0:
+            continue
+        bucket_rows.append(
+            {
+                "layer": layer,
+                "q_head": q_head,
+                "k_head": k_head,
+                "q_bucket": int(q_bucket),
+                "k_bucket": int(k_bucket),
+                "ap_bucket": value,
+            }
+        )
+
+    return row, bucket_rows, component_rows
 
 
 def _extract_sliding_window_value(

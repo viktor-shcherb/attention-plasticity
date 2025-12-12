@@ -51,9 +51,10 @@ The script infers key-head indices by grouping query heads evenly across key hea
    python analyze.py --config configs/smollm2-135m.yaml
    ```
    Any flag can override the YAML at runtime (e.g., `--max_workers 4`, `--dataset_name your-user/sniffed-qk`).
-3. The script processes every query head, writing
+3. The CLI first downloads (or reuses) a local snapshot of the dataset via `huggingface_hub.snapshot_download`. Set `dataset_local_root` if you already have the files on disk, or `dataset_cache_dir`/`download_max_workers` to control where/how the snapshot is stored. Once cached, the script processes every query head, writing
    - `head_metrics.csv`: per-head summary stats (positions R², MAE ratios, residual skew/kurtosis, KS pass rates, `ap_overall`).
-   - `head_bucket_plasticity.csv`: plasticity per bucket per head (may contain NaNs if insufficient data).
+   - `head_bucket_plasticity.csv`: plasticity per `(q_bucket, k_bucket)` per head (skips `q_bucket=0`, may contain NaNs when a bucket lacks query or key pairs).
+   - `head_component_weights.csv`: per-component positional R² plus normalized “share of linear positional information” weights (each head sums to 1 across components).
 
 Progress messages note which head has completed and highlight errors (e.g., shape mismatches, missing datasets).
 
@@ -70,6 +71,28 @@ Key options (CLI flags or YAML):
 - `color_by_layer` or `color_trend`: highlight traces by layer index or monotonic trend
 - `output`: save to a file instead of showing interactively
 
+For a model-level view of how queries attend to earlier buckets, render a 2D
+histogram (q_bucket vs. k_bucket) with attention plasticity as the cell color:
+```bash
+python scripts/plot_bucket_heatmap.py --bucket_csv results/qwen3-8b/head_bucket_plasticity.csv --output bucket_heatmap.png
+```
+Use `--agg median` to aggregate with a median instead of mean, and tweak `--cmap`,
+`--vmin`, `--vmax`, or `--title` for presentation tweaks. Positions on both axes
+are taken from the *start* of each bucket (`bucket_type`=`uniform` uses
+`bucket * bucket_min_size`, `log` uses `2^bucket * bucket_min_size`). The script
+also accepts YAML configs
+(e.g., `--config configs/plots/qwen3-8b-heatmap.yaml` or
+`configs/plots/smollm2-135m-heatmap.yaml`) mirroring the CLI flags.
+
+To see where the model stores positional information in the rotated embedding
+space, average the per-component weights and draw a bar chart:
+```bash
+python scripts/plot_component_weights.py --config configs/plots/qwen3-8b-components.yaml
+```
+This script expects `head_component_weights.csv` and normalizes every head so its
+component weights sum to 1 before averaging, making it easy to highlight common
+components that carry positional “linear information.”
+
 ## Configuration Reference
 Every run starts from a YAML file with at least these fields:
 | Field | Description |
@@ -78,11 +101,14 @@ Every run starts from a YAML file with at least these fields:
 | `dataset_name` | Hugging Face dataset identifier (defaults to `viktoroo/sniffed-qk`) |
 | `num_layers` | Transformer layers to scan |
 | `num_q_heads` / `num_k_heads` | Query and key heads per layer; query heads must be a multiple of key heads |
+| `dataset_local_root` | Optional path to an already-downloaded dataset snapshot (skips downloading) |
+| `dataset_cache_dir` | Custom cache directory to store the snapshot (defaults to Hugging Face cache) |
+| `download_max_workers` | Max workers for `snapshot_download` (defaults to library value) |
 | `max_tokens_per_head` | Cap on tokens sampled per head (random without replacement) |
 | `normality_max_dims` | Max number of noise dims tested for KS statistics |
 | `p_alpha` | Significance level for KS tests |
 | `seed` | RNG seed controlling subsampling and bucket pair sampling |
-| `output_csv`, `bucket_csv` | Paths for per-head and per-bucket outputs |
+| `output_csv`, `bucket_csv`, `component_csv` | Paths for per-head metrics, per-bucket plasticities, and per-component weights |
 | `max_workers` | Process pool size (`None` = CPU count)
 
 ## Testing

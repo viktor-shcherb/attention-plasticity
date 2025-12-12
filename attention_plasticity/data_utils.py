@@ -13,7 +13,7 @@ def fit_bucket_stats(ds) -> Dict[int, Dict[str, np.ndarray]]:
     Per-bucket mean/std/n plus effective positions (empirical + geometric).
     Used to compute orientation and diagnostics.
     """
-    df = ds["train"].to_pandas()
+    df = ds.to_pandas()
     out: Dict[int, Dict[str, np.ndarray]] = {}
     for bucket, sub in df.groupby("bucket", sort=True):
         X = np.vstack(sub["vector"].values).astype(np.float64)
@@ -45,15 +45,17 @@ def stack_oriented_examples(
     max_tokens: Optional[int] = None,
     seed: int = 0,
     return_sliding_window: bool = False,
+    return_example_id: bool = False,
 ) -> Union[
     Tuple[np.ndarray, np.ndarray, np.ndarray],
     Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
 ]:
     """
     Return (positions, bucket_idx, oriented_vectors) from a dataset.
     Optionally subsample to max_tokens.
     """
-    df = ds["train"].to_pandas()
+    df = ds.to_pandas()
     if max_tokens is not None and len(df) > max_tokens:
         rng = np.random.default_rng(seed)
         idx = rng.choice(len(df), size=max_tokens, replace=False)
@@ -62,11 +64,20 @@ def stack_oriented_examples(
     p = df["position"].to_numpy().astype(np.float64)
     b = df["bucket"].to_numpy().astype(np.float64)
     X = np.vstack(df["vector"].values).astype(np.float64) * orient[None, :]
-    if not return_sliding_window:
-        return p, b, X
+    outputs: list = [p, b, X]
 
-    if "sliding_window" in df.columns:
-        sliding = df["sliding_window"].to_numpy(dtype=np.float64)
-    else:
-        sliding = np.zeros(len(df), dtype=np.float64)
-    return p, b, X, sliding
+    if return_sliding_window:
+        if "sliding_window" in df.columns:
+            sliding = df["sliding_window"].to_numpy(dtype=np.float64)
+        else:
+            sliding = np.zeros(len(df), dtype=np.float64)
+        outputs.append(sliding)
+
+    if return_example_id:
+        if "example_id" in df.columns:
+            example_ids = df["example_id"].to_numpy()
+        else:
+            example_ids = np.arange(len(df), dtype=np.int64)
+        outputs.append(example_ids.astype(np.int64, copy=False))
+
+    return tuple(outputs)

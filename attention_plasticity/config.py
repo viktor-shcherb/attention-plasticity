@@ -22,9 +22,13 @@ class RunnerConfig:
     p_alpha: float = 0.01
     output_csv: str = "head_metrics.csv"
     bucket_csv: str = "head_bucket_plasticity.csv"
+    component_csv: str = "head_component_information.csv"
     seed: int = 0
     max_workers: Optional[int] = None
     dataset_name: str = DEFAULT_DATASET_NAME
+    dataset_cache_dir: Optional[str] = None
+    dataset_local_root: Optional[str] = None
+    download_max_workers: Optional[int] = None
 
     def with_overrides(self, **overrides: Any) -> "RunnerConfig":
         data = asdict(self)
@@ -49,6 +53,7 @@ class RunnerConfig:
             "p_alpha": self.p_alpha,
             "seed": self.seed,
             "dataset_name": self.dataset_name,
+            "dataset_local_root": self.dataset_local_root,
         }
 
 

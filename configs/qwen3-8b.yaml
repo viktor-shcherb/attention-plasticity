@@ -9,4 +9,5 @@ p_alpha: 0.01
 seed: 0
 output_csv: results/qwen3-8b/head_metrics.csv
 bucket_csv: results/qwen3-8b/head_bucket_plasticity.csv
-max_workers: 1
+component_csv: results/qwen3-8b/head_component_weights.csv
+max_workers: 8

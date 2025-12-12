@@ -3,10 +3,10 @@
 Plot per-bucket attention plasticity for a model.
 
 The script expects the per-bucket CSV emitted by analyze.py (columns:
-layer, q_head, k_head, bucket, ap_bucket). It draws faint lines for
-each head and a bold red line for the mean across heads. Additional
-options let you control bucket type/scale, add model labels, and color
-heads by layer.
+layer, q_head, k_head, q_bucket, k_bucket, ap_bucket). It aggregates
+over k_bucket, draws faint lines for each head, and a bold red line for
+the mean across heads. Additional options let you control bucket
+type/scale, add model labels, and color heads by layer.
 """
 
 from __future__ import annotations
@@ -164,11 +164,31 @@ def main():
     if not bucket_csv.exists():
         raise FileNotFoundError(f"Bucket CSV not found: {bucket_csv}")
 
-    df = pd.read_csv(bucket_csv)
-    df = df.dropna(subset=["ap_bucket"])
-    if df.empty:
+    df_raw = pd.read_csv(bucket_csv)
+    new_schema = {"layer", "q_head", "k_head", "q_bucket", "k_bucket", "ap_bucket"}
+    legacy_schema = {"layer", "q_head", "k_head", "bucket", "ap_bucket"}
+    columns = set(df_raw.columns)
+    if new_schema.issubset(columns):
+        df_work = df_raw.copy()
+    elif legacy_schema.issubset(columns):
+        df_work = df_raw.rename(columns={"bucket": "q_bucket"}).copy()
+        df_work["k_bucket"] = df_work["q_bucket"]
+    else:
+        raise ValueError(
+            "Bucket CSV must contain either (layer,q_head,k_head,q_bucket,k_bucket,ap_bucket) "
+            "or the legacy columns (layer,q_head,k_head,bucket,ap_bucket)."
+        )
+
+    df_work = df_work.dropna(subset=["ap_bucket"])
+    if df_work.empty:
         raise ValueError("No per-bucket plasticity values found in CSV.")
 
+    df = (
+        df_work.groupby(["layer", "q_head", "k_head", "q_bucket"], as_index=False)[
+            "ap_bucket"
+        ].mean()
+    )
+    df = df.rename(columns={"q_bucket": "bucket"})
     df = df.sort_values(["bucket", "layer", "q_head"])
     df["head_id"] = df.apply(head_identifier, axis=1)
 

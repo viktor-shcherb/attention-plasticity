@@ -1,0 +1,13 @@
+model_dir: Qwen_Qwen3_8B
+dataset_name: viktoroo/sniffed-qk-qwen3-8b-yarn4x
+num_layers: 36
+num_q_heads: 32
+num_k_heads: 8
+max_tokens_per_head: 50000
+normality_max_dims: 128
+p_alpha: 0.01
+seed: 0
+output_csv: results/qwen3-8b-yarn4x/head_metrics.csv
+bucket_csv: results/qwen3-8b-yarn4x/head_bucket_plasticity.csv
+component_csv: results/qwen3-8b-yarn4x/head_component_weights.csv
+max_workers: 8

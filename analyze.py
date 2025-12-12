@@ -24,6 +24,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from attention_plasticity.config import RunnerConfig, load_runner_config
+from attention_plasticity.dataset_cache import prepare_local_dataset
 from attention_plasticity.head_analysis import analyze_head
 
 load_dotenv()
@@ -50,6 +51,24 @@ def parse_args(argv=None):
         type=str,
         default=None,
         help="Override: datasets hub identifier to load vectors from.",
+    )
+    p.add_argument(
+        "--dataset_cache_dir",
+        type=str,
+        default=None,
+        help="Optional cache directory for snapshot_download (default Hugging Face cache).",
+    )
+    p.add_argument(
+        "--dataset_local_root",
+        type=str,
+        default=None,
+        help="Use an already-downloaded dataset located at this path; skips snapshot_download.",
+    )
+    p.add_argument(
+        "--download_max_workers",
+        type=int,
+        default=None,
+        help="Override: max_workers passed to snapshot_download when fetching the dataset.",
     )
     p.add_argument(
         "--num_layers",
@@ -100,6 +119,12 @@ def parse_args(argv=None):
         help="Override: output CSV file for per-bucket plasticities.",
     )
     p.add_argument(
+        "--component_csv",
+        type=str,
+        default=None,
+        help="Override: output CSV file for per-component positional weights.",
+    )
+    p.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -124,15 +149,15 @@ def _head_specs(num_layers: int, num_q_heads: int, group_size: int) -> Iterable[
 def _analyze_head_task(payload: Tuple[int, int, int, Dict[str, object]]):
     layer, q_head, k_head, kwargs = payload
     try:
-        row, bucket_rows = analyze_head(
+        row, bucket_rows, component_rows = analyze_head(
             layer=layer,
             q_head=q_head,
             k_head=k_head,
             **kwargs,
         )
-        return layer, q_head, k_head, row, bucket_rows, None
+        return layer, q_head, k_head, row, bucket_rows, component_rows, None
     except Exception as exc:  # pragma: no cover - surfaced through result handling
-        return layer, q_head, k_head, None, [], f"{exc.__class__.__name__}: {exc}"
+        return layer, q_head, k_head, None, [], [], f"{exc.__class__.__name__}: {exc}"
 
 
 def _run_tasks(
@@ -142,15 +167,16 @@ def _run_tasks(
 ):
     rows: List[Dict[str, object]] = []
     bucket_rows: List[Dict[str, object]] = []
+    component_rows: List[Dict[str, object]] = []
     tasks = [(layer, q_head, k_head, kwargs) for layer, q_head, k_head in specs]
     if not tasks:
-        return rows, bucket_rows
+        return rows, bucket_rows, component_rows
 
     if max_workers == 1:
         for payload in tasks:
             result = _analyze_head_task(payload)
-            _process_result(result, rows, bucket_rows)
-        return rows, bucket_rows
+            _process_result(result, rows, bucket_rows, component_rows)
+        return rows, bucket_rows, component_rows
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -159,12 +185,17 @@ def _run_tasks(
         }
         for future in as_completed(futures):
             result = future.result()
-            _process_result(result, rows, bucket_rows)
-    return rows, bucket_rows
+            _process_result(result, rows, bucket_rows, component_rows)
+    return rows, bucket_rows, component_rows
 
 
-def _process_result(result, rows: List[Dict[str, object]], bucket_rows: List[Dict[str, object]]):
-    layer, q_head, k_head, row, buckets, error = result
+def _process_result(
+    result,
+    rows: List[Dict[str, object]],
+    bucket_rows: List[Dict[str, object]],
+    component_rows: List[Dict[str, object]],
+):
+    layer, q_head, k_head, row, buckets, components, error = result
     if error:
         print(
             f"Error at layer {layer}, q_head {q_head}, k_head {k_head}: {error}",
@@ -174,6 +205,7 @@ def _process_result(result, rows: List[Dict[str, object]], bucket_rows: List[Dic
     else:
         rows.append(row)
         bucket_rows.extend(buckets)
+        component_rows.extend(components)
         print(
             f"Analyzed layer {layer}, q_head {q_head}, k_head {k_head}",
             flush=True,
@@ -188,6 +220,9 @@ def main(argv=None):
         for field in [
             "model_dir",
             "dataset_name",
+            "dataset_cache_dir",
+            "dataset_local_root",
+            "download_max_workers",
             "num_layers",
             "num_q_heads",
             "num_k_heads",
@@ -196,12 +231,32 @@ def main(argv=None):
             "p_alpha",
             "output_csv",
             "bucket_csv",
+            "component_csv",
             "seed",
             "max_workers",
         ]
         if getattr(args, field) is not None
     }
     config = base_config.with_overrides(**overrides)
+
+    dataset_local_root = config.dataset_local_root
+    if dataset_local_root:
+        dataset_root_path = Path(dataset_local_root).expanduser().resolve()
+        dataset_local_root = str(dataset_root_path)
+        print(f"Using existing dataset snapshot at {dataset_root_path}")
+    else:
+        print(
+            f"Downloading dataset '{config.dataset_name}' "
+            f"(split directory '{config.model_dir}') via snapshot_download..."
+        )
+        dataset_root_path = prepare_local_dataset(
+            repo_id=config.dataset_name,
+            model_dir=config.model_dir,
+            cache_dir=config.dataset_cache_dir,
+            max_workers=config.download_max_workers,
+        ).resolve()
+        dataset_local_root = str(dataset_root_path)
+        print(f"Dataset cached under {dataset_root_path}")
 
     np.random.seed(config.seed)
 
@@ -214,7 +269,9 @@ def main(argv=None):
     worker_count = config.resolve_worker_count()
 
     specs = list(_head_specs(config.num_layers, config.num_q_heads, group_size))
-    rows, bucket_rows = _run_tasks(specs, config.task_kwargs(), worker_count)
+    task_kwargs = config.task_kwargs()
+    task_kwargs["dataset_local_root"] = dataset_local_root
+    rows, bucket_rows, component_rows = _run_tasks(specs, task_kwargs, worker_count)
 
     if not rows:
         print("No heads analyzed successfully; nothing to save.")
@@ -225,12 +282,24 @@ def main(argv=None):
     df = pd.DataFrame(rows)
     df.to_csv(config.output_csv, index=False)
     print(f"Saved per-head metrics to {config.output_csv}")
+    bucket_parent = Path(config.bucket_csv).parent
+    bucket_parent.mkdir(parents=True, exist_ok=True)
+    component_parent = Path(config.component_csv).parent
+    component_parent.mkdir(parents=True, exist_ok=True)
+
     if bucket_rows:
         buckets_df = pd.DataFrame(bucket_rows)
         buckets_df.to_csv(config.bucket_csv, index=False)
         print(f"Saved per-bucket plasticities to {config.bucket_csv}")
     else:
         print("No per-bucket plasticities to save.")
+
+    if component_rows:
+        components_df = pd.DataFrame(component_rows)
+        components_df.to_csv(config.component_csv, index=False)
+        print(f"Saved per-component positional weights to {config.component_csv}")
+    else:
+        print("No component weights to save.")
 
     # Simple summary statistics
     key_cols = [

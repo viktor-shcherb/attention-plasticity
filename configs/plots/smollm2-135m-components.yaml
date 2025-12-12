@@ -1,0 +1,6 @@
+component_csv: results/smollm2-135m/head_component_weights.csv
+output: results/smollm2-135m/component_weights.png
+limit: 64
+agg: mean
+title: "SmolLM2-135M positional information by component"
+ylabel: "Average share of linear info"

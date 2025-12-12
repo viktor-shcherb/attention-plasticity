@@ -36,14 +36,20 @@ class DummyDataset:
             raise KeyError(key)
         return self._split
 
+    def to_pandas(self):
+        return self._split.to_pandas()
 
-def make_df(vectors, buckets, positions, sliding_window=None):
+
+def make_df(vectors, buckets, positions, sliding_window=None, example_ids=None):
+    n = len(buckets)
     if sliding_window is None:
-        sliding_window = [0] * len(buckets)
+        sliding_window = [0] * n
+    if example_ids is None:
+        example_ids = np.arange(n)
     return pd.DataFrame(
         {
             "bucket": buckets,
-            "example_id": np.arange(len(buckets)),
+            "example_id": example_ids,
             "position": positions,
             "vector": [np.asarray(v, dtype=np.float64) for v in vectors],
             "sliding_window": sliding_window,
@@ -156,8 +162,9 @@ def test_compute_attention_plasticity_expected_value():
     p_k = np.array([0.0, 0.0])
     b_k = np.array([0, 0])
     X_k_rot = np.array([[1.0], [-1.0]])
+    example_ids = np.array([0, 0])
 
-    ap_overall, ap_bucket = compute_attention_plasticity(
+    ap_overall, ap_pairs = compute_attention_plasticity(
         p_q=p_q,
         b_q=b_q,
         X_q_rot=X_q_rot,
@@ -166,16 +173,17 @@ def test_compute_attention_plasticity_expected_value():
         resid_var=resid_var,
         p_k=p_k,
         b_k=b_k,
+        example_ids_k=example_ids,
         X_k_rot=X_k_rot,
         num_pairs_per_bucket=1,
         seed=0,
     )
 
-    assert math.isnan(ap_bucket[0])
     p_z = 0.5 * (1 + math.erf(1 / math.sqrt(2)))
     expected_pp = 4 * p_z * (1 - p_z)
-    assert ap_bucket[1] == pytest.approx(expected_pp, rel=1e-6)
-    assert ap_overall == pytest.approx(ap_bucket[1], rel=1e-6)
+    assert (1, 0) in ap_pairs
+    assert ap_pairs[(1, 0)] == pytest.approx(expected_pp, rel=1e-6)
+    assert ap_overall == pytest.approx(ap_pairs[(1, 0)], rel=1e-6)
 
 
 def test_compute_attention_plasticity_respects_bucket_window_limits():
@@ -186,11 +194,12 @@ def test_compute_attention_plasticity_respects_bucket_window_limits():
     beta_rot = np.array([1.0])
     resid_var = np.array([1.0])
 
-    p_k = np.array([0.0, 0.1])
-    b_k = np.array([0, 1])
-    X_k_rot = np.array([[1.0], [2.0]])
+    p_k = np.array([0.0, 0.1, 1.0, 1.1])
+    b_k = np.array([0, 0, 1, 1])
+    X_k_rot = np.array([[1.0], [0.5], [2.0], [1.5]])
+    example_ids = np.array([0, 0, 1, 1])
 
-    ap_overall, ap_bucket = compute_attention_plasticity(
+    ap_overall, ap_pairs = compute_attention_plasticity(
         p_q=p_q,
         b_q=b_q,
         X_q_rot=X_q_rot,
@@ -199,14 +208,17 @@ def test_compute_attention_plasticity_respects_bucket_window_limits():
         resid_var=resid_var,
         p_k=p_k,
         b_k=b_k,
+        example_ids_k=example_ids,
         X_k_rot=X_k_rot,
         num_pairs_per_bucket=1,
         seed=0,
         bucket_window_limits=None,
     )
 
-    assert 2 in ap_bucket
-    assert not math.isnan(ap_bucket[2])
+    assert (2, 0) in ap_pairs
+    assert not math.isnan(ap_pairs[(2, 0)])
+    assert (2, 1) in ap_pairs
+    assert not math.isnan(ap_pairs[(2, 1)])
 
     _, constrained = compute_attention_plasticity(
         p_q=p_q,
@@ -217,13 +229,51 @@ def test_compute_attention_plasticity_respects_bucket_window_limits():
         resid_var=resid_var,
         p_k=p_k,
         b_k=b_k,
+        example_ids_k=example_ids,
         X_k_rot=X_k_rot,
         num_pairs_per_bucket=1,
         seed=0,
         bucket_window_limits={2: 1},
     )
 
-    assert math.isnan(constrained[2])
+    assert (2, 0) not in constrained
+    assert (2, 1) in constrained
+    assert not math.isnan(constrained[(2, 1)])
+
+
+def test_compute_attention_plasticity_enforces_same_example_pairs():
+    p_q = np.array([1.0])
+    b_q = np.array([1])
+    X_q_rot = np.array([[0.0]])
+    alpha_rot = np.array([1.0])
+    beta_rot = np.array([0.0])
+    resid_var = np.array([1.0])
+
+    p_k = np.zeros(3)
+    b_k = np.array([0, 0, 0])
+    X_k_rot = np.array([[0.0], [1.0], [100.0]])
+    example_ids = np.array([0, 0, 1])
+
+    ap_overall, ap_pairs = compute_attention_plasticity(
+        p_q=p_q,
+        b_q=b_q,
+        X_q_rot=X_q_rot,
+        alpha_rot=alpha_rot,
+        beta_rot=beta_rot,
+        resid_var=resid_var,
+        p_k=p_k,
+        b_k=b_k,
+        example_ids_k=example_ids,
+        X_k_rot=X_k_rot,
+        num_pairs_per_bucket=1,
+        seed=0,
+    )
+
+    assert (1, 0) in ap_pairs
+    p_expected = 0.5 * (1 + math.erf(-1.0 / math.sqrt(2)))
+    expected_pp = 4 * p_expected * (1 - p_expected)
+    assert ap_pairs[(1, 0)] == pytest.approx(expected_pp, rel=1e-6)
+    assert ap_overall == pytest.approx(expected_pp, rel=1e-6)
 
 
 def test_analyze_head_with_dummy_data(monkeypatch):
@@ -235,7 +285,7 @@ def test_analyze_head_with_dummy_data(monkeypatch):
     positions_k = np.array([0.0, 0.5, 1.5, 2.5])
     buckets_k = np.array([0, 0, 1, 1])
     vectors_k = [np.array([p + 0.1, -(p + 0.1)], dtype=np.float64) for p in positions_k]
-    df_k = make_df(vectors_k, buckets_k, positions_k)
+    df_k = make_df(vectors_k, buckets_k, positions_k, example_ids=[0, 0, 1, 1])
 
     model_dir = "dummy_model"
     dataset_store = {
@@ -245,13 +295,21 @@ def test_analyze_head_with_dummy_data(monkeypatch):
 
     dataset_name = "custom/sniffed-qk"
 
-    def fake_load_dataset(name, data_dir):
-        assert name == dataset_name
-        return dataset_store[data_dir]
+    def fake_hf_hub_url(repo_id, filename, repo_type):
+        assert repo_id == dataset_name
+        assert repo_type == "dataset"
+        return filename
 
+    def fake_load_dataset(name, *, data_files=None, split=None):
+        assert name == "parquet"
+        assert data_files is not None
+        key = data_files.rsplit("/data.parquet", 1)[0]
+        return dataset_store[key]
+
+    monkeypatch.setattr(head_analysis, "hf_hub_url", fake_hf_hub_url)
     monkeypatch.setattr(head_analysis, "load_dataset", fake_load_dataset)
 
-    row, bucket_rows = analyze_head(
+    row, bucket_rows, component_rows = analyze_head(
         layer=0,
         q_head=0,
         k_head=0,
@@ -270,12 +328,16 @@ def test_analyze_head_with_dummy_data(monkeypatch):
     assert row["d_model"] == 2
     assert row["q_R2_pos"] == pytest.approx(1.0, abs=1e-6)
     assert 0.0 <= row["ap_overall"] <= 1.0
-    assert bucket_rows  # should contain entries for buckets 0 and 1 (with possible NaNs)
-    assert {entry["bucket"] for entry in bucket_rows} == {0, 1}
+    assert bucket_rows
+    assert all(entry["q_bucket"] > 0 for entry in bucket_rows)
+    assert {(entry["q_bucket"], entry["k_bucket"]) for entry in bucket_rows} == {(1, 0)}
     for entry in bucket_rows:
         assert entry["layer"] == 0
         assert entry["q_head"] == 0
         assert entry["k_head"] == 0
+    assert len(component_rows) == 2
+    weights = [entry["component_weight"] for entry in component_rows]
+    assert pytest.approx(sum(weights), rel=1e-6) == 1.0
 
 
 def test_analyze_head_respects_sliding_window_column(monkeypatch):
@@ -283,10 +345,15 @@ def test_analyze_head_respects_sliding_window_column(monkeypatch):
     buckets_q = np.array([0, 1, 2])
     vectors_q = [np.array([p, -p], dtype=np.float64) for p in positions_q]
 
-    positions_k = np.array([0.0, 0.1])
-    buckets_k = np.array([0, 1])
-    vectors_k = [np.array([1.0, -1.0]), np.array([2.0, -2.0])]
-    df_k = make_df(vectors_k, buckets_k, positions_k)
+    positions_k = np.array([0.0, 0.1, 1.0, 1.1])
+    buckets_k = np.array([0, 0, 1, 1])
+    vectors_k = [
+        np.array([1.0, -1.0]),
+        np.array([1.5, -1.5]),
+        np.array([2.0, -2.0]),
+        np.array([2.5, -2.5]),
+    ]
+    df_k = make_df(vectors_k, buckets_k, positions_k, example_ids=[0, 0, 1, 1])
 
     dataset_name = "custom/sniffed-qk"
     model_dir = "dummy_model"
@@ -298,13 +365,21 @@ def test_analyze_head_respects_sliding_window_column(monkeypatch):
             f"{model_dir}/l00h00k": DummyDataset(df_k),
         }
 
-        def fake_load_dataset(name, data_dir):
-            assert name == dataset_name
-            return dataset_store[data_dir]
+        def fake_hf_hub_url(repo_id, filename, repo_type):
+            assert repo_id == dataset_name
+            assert repo_type == "dataset"
+            return filename
 
+        def fake_load_dataset(name, *, data_files=None, split=None):
+            assert name == "parquet"
+            assert data_files is not None
+            key = data_files.rsplit("/data.parquet", 1)[0]
+            return dataset_store[key]
+
+        monkeypatch.setattr(head_analysis, "hf_hub_url", fake_hf_hub_url)
         monkeypatch.setattr(head_analysis, "load_dataset", fake_load_dataset)
 
-        _, bucket_rows = analyze_head(
+        _, bucket_rows, component_rows = analyze_head(
             layer=0,
             q_head=0,
             k_head=0,
@@ -315,15 +390,21 @@ def test_analyze_head_respects_sliding_window_column(monkeypatch):
             seed=0,
             dataset_name=dataset_name,
         )
-        return {entry["bucket"]: entry["ap_bucket"] for entry in bucket_rows}
+        assert len(component_rows) == len(vectors_q[0])
+        weight_sum = sum(entry["component_weight"] for entry in component_rows)
+        assert pytest.approx(weight_sum, rel=1e-6) == 1.0
+
+        return {
+            (entry["q_bucket"], entry["k_bucket"]): entry["ap_bucket"]
+            for entry in bucket_rows
+        }
 
     full_map = run_analysis([0, 0, 0])
-    assert 2 in full_map
-    assert not math.isnan(full_map[2])
+    assert (2, 0) in full_map
+    assert not math.isnan(full_map[(2, 0)])
 
     window_map = run_analysis([1, 1, 1])
-    assert 2 in window_map
-    assert math.isnan(window_map[2])
+    assert (2, 0) not in window_map
 
 
 def test_analyze_head_rejects_mixed_sliding_window(monkeypatch):
@@ -335,7 +416,7 @@ def test_analyze_head_rejects_mixed_sliding_window(monkeypatch):
     positions_k = np.array([0.0, 0.1])
     buckets_k = np.array([0, 0])
     vectors_k = [np.array([1.0, -1.0]), np.array([-1.0, 1.0])]
-    df_k = make_df(vectors_k, buckets_k, positions_k)
+    df_k = make_df(vectors_k, buckets_k, positions_k, example_ids=[0, 0])
 
     dataset_name = "custom/sniffed-qk"
     model_dir = "dummy_model"
@@ -344,10 +425,18 @@ def test_analyze_head_rejects_mixed_sliding_window(monkeypatch):
         f"{model_dir}/l00h00k": DummyDataset(df_k),
     }
 
-    def fake_load_dataset(name, data_dir):
-        assert name == dataset_name
-        return dataset_store[data_dir]
+    def fake_hf_hub_url(repo_id, filename, repo_type):
+        assert repo_id == dataset_name
+        assert repo_type == "dataset"
+        return filename
 
+    def fake_load_dataset(name, *, data_files=None, split=None):
+        assert name == "parquet"
+        assert data_files is not None
+        key = data_files.rsplit("/data.parquet", 1)[0]
+        return dataset_store[key]
+
+    monkeypatch.setattr(head_analysis, "hf_hub_url", fake_hf_hub_url)
     monkeypatch.setattr(head_analysis, "load_dataset", fake_load_dataset)
 
     with pytest.raises(ValueError):
@@ -362,3 +451,57 @@ def test_analyze_head_rejects_mixed_sliding_window(monkeypatch):
             seed=0,
             dataset_name=dataset_name,
         )
+
+
+def test_analyze_head_uses_local_dataset(monkeypatch, tmp_path):
+    positions_q = np.array([0.0, 1.0])
+    buckets_q = np.array([0, 1])
+    vectors_q = [np.array([p, -p], dtype=np.float64) for p in positions_q]
+    df_q = make_df(vectors_q, buckets_q, positions_q)
+
+    positions_k = np.array([0.0, 0.5])
+    buckets_k = np.array([0, 0])
+    vectors_k = [np.array([1.0, -1.0]), np.array([2.0, -2.0])]
+    df_k = make_df(vectors_k, buckets_k, positions_k, example_ids=[0, 0])
+
+    dataset_root = tmp_path / "snapshot"
+    model_dir = "dummy_model"
+    q_path = dataset_root / model_dir / "l00h00q" / "data.parquet"
+    k_path = dataset_root / model_dir / "l00h00k" / "data.parquet"
+    q_path.parent.mkdir(parents=True, exist_ok=True)
+    k_path.parent.mkdir(parents=True, exist_ok=True)
+    q_path.write_text("")
+    k_path.write_text("")
+
+    dataset_store = {
+        str(q_path): DummyDataset(df_q),
+        str(k_path): DummyDataset(df_k),
+    }
+
+    def fake_load_dataset(name, *, data_files=None, split=None):
+        assert name == "parquet"
+        assert data_files in dataset_store
+        return dataset_store[data_files]
+
+    def fail_hf_hub_url(*args, **kwargs):
+        raise AssertionError("hf_hub_url should not be called when dataset_local_root is set")
+
+    monkeypatch.setattr(head_analysis, "load_dataset", fake_load_dataset)
+    monkeypatch.setattr(head_analysis, "hf_hub_url", fail_hf_hub_url)
+
+    row, bucket_rows, component_rows = analyze_head(
+        layer=0,
+        q_head=0,
+        k_head=0,
+        model_dir=model_dir,
+        max_tokens_per_head=10,
+        normality_max_dims=2,
+        p_alpha=0.05,
+        seed=0,
+        dataset_name="custom/sniffed-qk",
+        dataset_local_root=str(dataset_root),
+    )
+
+    assert row["n_q_tokens"] == 2
+    assert component_rows
+    assert pytest.approx(sum(entry["component_weight"] for entry in component_rows), rel=1e-6) == 1.0

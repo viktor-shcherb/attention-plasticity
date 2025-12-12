@@ -1,0 +1,6 @@
+component_csv: results/qwen3-8b/head_component_weights.csv
+output: results/qwen3-8b/component_weights.png
+limit: 128
+agg: mean
+title: "Qwen3-8B positional information by component"
+ylabel: "Average share of linear info"

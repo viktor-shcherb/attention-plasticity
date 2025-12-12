@@ -1,0 +1,7 @@
+bucket_csv: results/qwen3-8b/head_bucket_plasticity.csv
+output: results/qwen3-8b/bucket_heatmap.png
+agg: mean
+cmap: magma
+title: "Qwen3-8B Attention Plasticity (q vs. k bucket)"
+bucket_type: uniform
+bucket_min_size: 2048

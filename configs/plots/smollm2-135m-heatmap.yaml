@@ -1,0 +1,7 @@
+bucket_csv: results/smollm2-135m/head_bucket_plasticity.csv
+output: results/smollm2-135m/bucket_heatmap.png
+agg: mean
+cmap: magma
+title: "SmolLM2-135M Attention Plasticity (q vs. k bucket)"
+bucket_type: uniform
+bucket_min_size: 512
